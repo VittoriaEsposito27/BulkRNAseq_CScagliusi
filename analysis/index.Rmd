@@ -1,0 +1,15 @@
+---
+title: "Home"
+site: workflowr::wflow_site
+output:
+  workflowr::wflow_html:
+    toc: false
+editor_options:
+  chunk_output_type: console
+---
+
+This  website contains RNA-seq data analyses.
+
+# RNAseq report for Carolina Scagliusi
+
+- [1-Bulk RNAseq analysis](241021_rnaseq_report_carolina.html)
