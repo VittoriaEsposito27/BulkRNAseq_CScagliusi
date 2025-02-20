@@ -1,0 +1,345 @@
+---
+title: "Bulk RNAseq report - Carolina Scagliusi"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    code_folding: hide
+date: "10/21/2024"
+author: "Vittoria Esposito"
+---
+
+# Overview
+
+- RNAseq samples have been analysed with STAR/salmon using [nf-core](https://nf-co.re/rnaseq) v3.11.2
+
+- Filtering steps: genes with reads in fewer than 11 samples are filtered out; genes with fewer reads across all samples less than nsamples/2 are filtered out.
+
+- Differential gene expression analysis has been performed using [DESeq2](http://bioconductor.org/packages/devel/bioc/vignettes/DESeq2/inst/doc/DESeq2.html)
+
+- Differential gene expression filters: folchange higher than log2(2) and padj < 0.01
+
+- Gene set enrichment analysis (GSEA) has been performed using [ClusterProfiler](https://bioconductor.org/packages/release/bioc/html/clusterProfiler.html)
+
+- GSEA filters: padj < 0.05
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r library, include=FALSE}
+if (!require("DT")) install.packages('DT')
+
+library("DESeq2")
+library(rtracklayer)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(gplots) 
+library(ggplot2)
+library("DT")
+library(reshape)
+library(plotly)
+library(clusterProfiler)
+library(dplyr)
+```
+
+
+```{r functions, include=FALSE}
+mydeseq2 = function(counts, min_reads, sample_info, min_sample = 5, ...){
+  # Get counts matrix from dds object
+  # counts = assay(dds)
+  
+  # Filter out genes with low expression
+  counts = counts[rowSums(counts) > min_reads & rowSums(counts > 1) > min_sample, ]
+  
+  # Ensure sample_info is in the correct order matching the dds object
+  sample_info <- sample_info[colnames(counts), ]
+  
+  ## Create new DESeq2 object accounting for batch effect
+  dds_current <- DESeqDataSetFromMatrix(
+    countData = counts,
+    colData = sample_info,
+    design = ~ batch + condition)  # Include batch effect in the design
+  
+  # Perform DESeq2 analysis
+  diff <- DESeq(dds_current, ...)
+  
+  # Initialize result holders
+  res_all = NULL
+  df_all_genes = NULL
+  
+  ## Loop through conditions and perform pairwise comparisons
+  for(i in 1:length(unique(sample_info$condition))){
+    for(j in 1:length(unique(sample_info$condition))){
+      if(i != j){
+        # Extract results for condition i vs condition j
+        res <- results(diff, contrast = c("condition", 
+                                          as.character(unique(sample_info$condition)[i]), 
+                                          as.character(unique(sample_info$condition)[j])))
+        
+        # Convert results to a dataframe
+        res = data.frame(res)
+        
+        # Add comparison information
+        res$comparison_n_vs_d = paste0(unique(sample_info$condition)[i], "_vs_", unique(sample_info$condition)[j])
+        res$gene = rownames(res)
+        
+        # Append results to res_all
+        res_all = rbind(res_all, res)
+        
+        # Filter out NA values for significant gene list
+        res = na.omit(res)
+        
+        # Append filtered results to df_all_genes
+        df_all_genes = rbind(df_all_genes, res)
+      }
+    }
+  }
+  
+  ## Normalize the data using rlog (with batch effect considered)
+  rld <- rlog(dds_current, blind = FALSE)
+  
+  # Return results as a list
+  return(list(res = res_all, df_all_genes = df_all_genes, rld = rld, coldata = sample_info))
+}
+```
+
+```{r parameters, echo=TRUE}
+
+rdata_file="/Users/ieo7095/Downloads/Chiocca_group_rnaseq_various/rnaseq_carolina/results_rnaseq/star_salmon/deseq2_qc/deseq2.dds.RData"
+qvalue=0.01
+logfc=log2(2)
+min_sample = 2 # minimum number of samples where the gene needs to have at least 1 read
+org = "org.Hs.eg.db"
+system("rm -r /Users/ieo7095/Downloads/Chiocca_group_rnaseq_various/rnaseq_carolina/gse_results/")
+system("mkdir /Users/ieo7095/Downloads/Chiocca_group_rnaseq_various/rnaseq_carolina/gse_results")
+```
+
+```{r load_data, include=FALSE}
+# load rdata from nfcore
+sample_info = read.table("/Users/ieo7095/Downloads/Chiocca_group_rnaseq_various/rnaseq_carolina/samples_info.tsv", header=T)
+rownames(sample_info) <- sample_info$sample
+sample_info$condition <- as.factor(sample_info$condition)
+sample_info$batch <- as.factor(sample_info$batch)
+load(rdata_file)
+```
+
+```{r}
+rownames(colData(dds)) <- sample_info$sample #change sample names
+dds$sample <- sample_info$sample
+# Per i campioni di controllo
+controls_1 <- dds[, dds$sample == "control_1"]
+controls_2 <- dds[, dds$sample == "control_2"]
+
+# Calcolare il livello di background (media dei conteggi normalizzati)
+background_1 <- rowMeans(counts(controls_1, normalized = TRUE))
+background_2 <- rowMeans(counts(controls_2, normalized = TRUE))
+
+# Campioni da 1 a 7 (HPV+ e HPV-)
+hpv_samples_1_7 <- dds[, dds$sample %in% c("sample_1","sample_2","sample_3","sample_4","sample_5","sample_6","sample_7")]
+counts_1_7_normalized <- counts(hpv_samples_1_7, normalized = TRUE)
+counts_1_7_corrected <- round(pmax(sweep(counts_1_7_normalized, 1, background_1, FUN = "-"),0))
+
+# Campioni da 9 a 16 (HPV+ e HPV-)
+hpv_samples_9_16 <- dds[, dds$sample %in% c("sample_9","sample_10","sample_11","sample_13","sample_14","sample_15","sample_16")]
+counts_9_16_normalized <- counts(hpv_samples_9_16, normalized = TRUE)
+counts_9_16_corrected <- round(pmax(sweep(counts_9_16_normalized, 1, background_2, FUN = "-"),0))
+
+# Combina i conteggi corretti per i campioni da 1 a 7 e da 9 a 16
+counts_corrected_all <- cbind(counts_1_7_corrected, counts_9_16_corrected)
+
+# Per i campioni 17-24 (già puliti, quindi usiamo i dati originali)
+hpv_samples_17_25 <- dds[, dds$sample %in% c("sample_17","sample_19","sample_20","sample_21","sample_22","sample_23","sample_24","sample_25")]
+counts_17_25 <- round(counts(hpv_samples_17_25, normalized = TRUE))
+
+# Unisci tutti i dati (campioni corretti + campioni puliti)
+final_counts <- cbind(counts_corrected_all, counts_17_25)
+
+# Crea un nuovo DESeqDataSet con i conteggi corretti
+dds_subset <- dds[, !dds$sample %in% c("control_1", "control_2")]
+sample_info <- sample_info[sample_info$condition!="Controllo",]
+# Convert sample_info to S4 DataFrame from S4Vectors
+sample_info <- DataFrame(sample_info)
+sample_info <- droplevels(sample_info)
+# Ensure row names of sample_info match the column names of final_counts
+rownames(sample_info) <- colnames(final_counts)
+colData(dds_subset) <- sample_info
+```
+
+
+## Mild filtering
+
+Genes total number of reads across all samples > 11 (half of the samples) are kept
+
+```{r mild_filtering_analysis, include=FALSE}
+mreads = round(ncol(dds_subset) / 2) ## filter genes without at least mreads reads in all condition combined
+out = mydeseq2(counts = final_counts, min_reads = mreads, min_sample = min_sample, sample_info = sample_info)
+res = out[["res"]]
+rld = out[["rld"]]
+df_all_genes = out[["df_all_genes"]]
+coldata = out[["coldata"]]
+all = na.omit(res)
+```
+
+
+# PCA
+Let's have a look at PCA, and gene expression pattern across samples.
+The batch effect has been considered in the design, but has not been corrected for this plot.
+```{r mf_pca_ma, message=FALSE, warning=FALSE}
+tmp = plotPCA(rld, intgroup = "condition", returnData=TRUE)
+plotly::plot_ly(data=tmp, x=~PC1, y=~PC2, text = ~name, color=~condition)
+```
+
+# HPVpos vs HPVneg
+
+
+### Volcano and MA plot
+
+```{r, message=FALSE, warning=FALSE}
+contrast = "HPVpos_vs_HPVneg"
+res = all[all$comparison_n_vs_d == contrast, ]
+select = which((res)$padj < qvalue &
+                 abs((res)$log2FoldChange) > logfc)
+res$significant = "nosignificant"
+res$significant[select] = "significant"
+
+
+plotly::plot_ly(data=res, x=~log2(baseMean), y=~log2FoldChange, color=~significant, text = ~gene, title="MA plot")
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+plotly::plot_ly(data=res, x=~log2FoldChange, y=~-log10(padj), color=~significant, text = ~gene, title="Volcano plot")
+```
+
+### Gene set enrichment analysis
+The dot plot below shows the top 10 most enriched GO terms. The size of each dot correlates with the count of differentially expressed genes associated with each GO term. Furthermore, the color of each dot reflects the significance of the enrichment of the respective GO term, highlighting its relative importance.
+```{r, message=FALSE, warning=FALSE, fig.height=16}
+genelist = res$log2FoldChange
+names(genelist) = res$gene
+gse <- gseGO(geneList=sort(genelist, decreasing = T), 
+                 ont = "BP", 
+                 keyType = "SYMBOL", 
+                 minGSSize = 3, 
+                 maxGSSize = 800, 
+                 pvalueCutoff = 0.05, 
+                 verbose = TRUE, 
+                 OrgDb = org, 
+                 pAdjustMethod = "BH")
+
+if(nrow(gse@result)>0){
+  pdf(paste0("gse_results/gse.", contrast, ".BP.pdf"))
+  print(dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign) + ggtitle("biological processes"))
+  dev.off()
+  
+  print(dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign) + ggtitle("biological processes"))
+  write.table(x=gse@result, file=paste0("gse_results/gse.", contrast, ".BP.tsv"), quote=F, row.names=F, sep="\t")
+}
+
+gse <- gseGO(geneList=sort(genelist, decreasing = T), 
+                 ont = "CC", 
+                 keyType = "SYMBOL", 
+                 minGSSize = 3, 
+                 maxGSSize = 800, 
+                 pvalueCutoff = 0.05, 
+                 verbose = TRUE, 
+                 OrgDb = org, 
+                 pAdjustMethod = "BH")
+
+if(nrow(gse@result)>0){
+  pdf(paste0("gse_results/gse.", contrast, ".CC.pdf"))
+  print(dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign) + ggtitle("Cellular components"))
+  dev.off()
+  print(dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign) + ggtitle("Cellular components"))
+  write.table(x=gse@result, file=paste0("gse_results/gse.", contrast, ".CC.tsv"), quote=F, row.names=F, sep="\t")
+}
+
+gse <- gseGO(geneList=sort(genelist, decreasing = T), 
+                 ont = "MF", 
+                 keyType = "SYMBOL", 
+                 minGSSize = 3, 
+                 maxGSSize = 800, 
+                 pvalueCutoff = 0.05, 
+                 verbose = TRUE, 
+                 OrgDb = org, 
+                 pAdjustMethod = "BH")
+if(nrow(gse@result)>0){
+  pdf(paste0("gse_results/gse.", contrast, ".MF.pdf"))
+  print(dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign) + ggtitle("Molecular function"))
+  dev.off()
+  print(dotplot(gse, showCategory=10, split=".sign") + facet_grid(.~.sign) + ggtitle("Molecular function"))
+  write.table(x=gse@result, file=paste0("gse_results/gse.", contrast, ".MF.tsv"), quote=F, row.names=F, sep="\t")
+}
+```
+
+# Table of all genes
+```{r, message=FALSE, warning=FALSE}
+datatable(
+  all,
+  extensions = 'Buttons',
+  options = list(
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    lengthMenu = list(c(10, 25, 50, -1),
+                      c(10, 25, 50, "All"))
+  ),
+  rownames = FALSE
+)
+```
+
+# Table of all differentially expressed genes
+
+```{r mf_table, message=FALSE, warning=FALSE}
+all$FoldChange = 2^all$log2FoldChange
+select = which((all)$padj < qvalue &
+                 abs((all)$log2FoldChange) > logfc)
+selected = all[select,]
+datatable(
+  selected[selected$comparison_n_vs_d == "HPVpos_vs_HPVneg", ],
+  extensions = 'Buttons',
+  options = list(
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print'),
+    lengthMenu = list(c(10, 25, 50, -1),
+                      c(10, 25, 50, "All"))
+  ),
+  rownames = FALSE,
+  caption = "HPVpos_vs_HPVneg"
+)
+
+all$differentially_expressed = "no"
+all$differentially_expressed[select] = "yes"
+final_table=selected[selected$comparison_n_vs_d == "HPVpos_vs_HPVneg",]
+
+write.table(x=final_table, file="gse_results/differential_expression_HPVpos_vs_HPVneg.csv", quote=F, row.names=F, sep=",")
+```
+
+## HEATMAP for top 20 genes in HPVpos_vs_HPVneg
+Significato dei Colori
+Rosso: Indica un'espressione alta per quel gene in un determinato campione (valore sopra la media, positivo rispetto alla scala standardizzata).
+Blu: Indica un'espressione bassa per quel gene in un determinato campione (valore sotto la media, negativo rispetto alla scala standardizzata).
+Bianco (o colore intermedio): Indica un'espressione vicina alla media (valore standardizzato intorno a 0).
+```{r}
+
+top20_genes <- final_table %>%
+  as.data.frame() %>%
+  arrange(padj) %>%
+  head(20) %>%
+  pull(gene)
+
+top20_counts <- all[top20_genes, ]
+data_pos_vs_neg <- assay(rld)[top20_genes, ]
+pheatmap(
+  t(scale(t(data_pos_vs_neg))),
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  color = colorRampPalette(c("blue", "white", "red"))(50),
+  main = "Top 20 DE Genes: HPVpos_vs_HPVneg"
+)
+```
+
